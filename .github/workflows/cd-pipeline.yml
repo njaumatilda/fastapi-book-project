@@ -1,0 +1,98 @@
+name: CD Pipeline
+on:
+  push:
+    branches:
+      - main
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Deploy to server
+        env:
+          AWS_SERVER_IP: '${{ secrets.AWS_SERVER_IP }}'
+          PRIVATE_KEY: '${{ secrets.PRIVATE_KEY }}'
+          USER: '${{ secrets.USER }}'
+        run: >
+          mkdir -p ~/.ssh
+
+          echo "$PRIVATE_KEY" > ~/.ssh/id_rsa
+
+          chmod 600 ~/.ssh/id_rsa
+
+
+          ssh-keyscan -H $AWS_SERVER_IP >> ~/.ssh/known_hosts
+
+
+          ssh $USER@$AWS_IP << 'EOF'
+
+            if [ ! -d "/home/ubuntu/fastapi-project" ]; then
+             git clone https://github.com/njaumatilda/fastapi-book-project.git /home/ubuntu/fastapi-project:
+            fi
+
+           cd /home/ubuntu/fastapi-project
+           git pull origin main  
+
+           pip install -r requirements.txt  
+
+
+          SERVICE_FILE="/etc/systemd/system/fastapi-book-project.service"
+
+          if [ ! -f "$SERVICE_FILE" ]; then
+
+          sudo bash -c 'cat > /etc/systemd/system/fastapi-book-project.service
+          <<EOL
+           [Unit]
+            Description=FastAPI Application
+            After=network.target
+
+           [Service]
+            User=ubuntu
+            WorkingDirectory=/home/ubuntu/fastapi-project
+            ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 7777
+            Restart=always
+            Environment=PYTHONUNBUFFERED=1
+
+           [Install]
+            WantedBy=multi-user.target
+          EOL'
+
+          fi
+
+          sudo systemctl daemon-reload
+
+          sudo systemctl enable fastapi-book-project
+
+          sudo systemctl restart fastapi-book-project
+
+          if ! command -v nginx &> /dev/null; then
+              sudo apt update && sudo apt install -y nginx
+              sudo systemctl enable nginx
+              sudo systemctl start nginx
+            fi
+            
+            NGINX_CONF="/etc/nginx/sites-available/fastapi"
+            if [ ! -f "$NGINX_CONF" ]; then
+              sudo bash -c 'cat > /etc/nginx/sites-available/fastapi <<EOL
+              server {
+              listen 77;
+              server_name '${{ secrets.AWS_SERVER_IP }}:77';
+              
+              location / {
+              proxy_pass http://127.0.0.1:7777;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+              
+              error_page 502 /502.html;
+              }
+              EOL'
+              
+              sudo ln -s /etc/nginx/sites-available/fastapi /etc/nginx/sites-enabled/
+              sudo nginx -t && sudo systemctl restart nginx
+              
+            fi
+
+          EOF
