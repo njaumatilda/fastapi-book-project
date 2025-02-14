@@ -12,26 +12,23 @@ jobs:
       - name: Deploy to server
         env:
           AWS_SERVER_IP: '${{ secrets.AWS_SERVER_IP }}'
-          PRIVATE_KEY: '${{ secrets.PRIVATE_KEY }}'
-          USER: '${{ secrets.USER }}'
+          SERVER_PASSWORD: '${{ secrets.SERVER_PASSWORD }}'
+          SERVER_USER: '${{ secrets.SERVER_USER }}'
         run: >
+          sudo apt-get update && sudo apt-get install -y sshpass
+
           mkdir -p ~/.ssh
-
-          echo "$PRIVATE_KEY" > ~/.ssh/id_rsa
-
-          chmod 600 ~/.ssh/id_rsa
-
 
           ssh-keyscan -H $AWS_SERVER_IP >> ~/.ssh/known_hosts
 
 
-          ssh $USER@$AWS_SERVER_IP << 'EOF'
+          sshpass -p ${{ secrets.SERVER_PASSWORD }} ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@$AWS_SERVER_IP "echo Connected successfully" << 'EOF'
 
-            if [ ! -d "/home/ubuntu/fastapi-book-project" ]; then
-             git clone https://github.com/njaumatilda/fastapi-book-project.git /home/ubuntu/fastapi-book-project:
+            if [ ! -d "/home/$SERVER_USER/fastapi-book-project" ]; then
+             git clone https://github.com/njaumatilda/fastapi-book-project.git /home/$SERVER_USER/fastapi-book-project
             fi
 
-           cd /home/ubuntu/fastapi-book-project
+           cd /home/$SERVER_USER/fastapi-book-project
            git pull origin main  
 
            pip install -r requirements.txt  
@@ -41,22 +38,21 @@ jobs:
 
           if [ ! -f "$SERVICE_FILE" ]; then
 
-          sudo bash -c 'cat > /etc/systemd/system/fastapi-book-project.service
-          <<EOL
+          sudo bash -c "cat <<EOL > /etc/systemd/system/fastapi-book-project.service
            [Unit]
             Description=FastAPI Application
             After=network.target
 
            [Service]
-            User=ubuntu
-            WorkingDirectory=/home/ubuntu/fastapi-book-project
+            User=$SERVER_USER
+            WorkingDirectory=/home/$SERVER_USER/fastapi-book-project
             ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 7777
             Restart=always
             Environment=PYTHONUNBUFFERED=1
 
            [Install]
             WantedBy=multi-user.target
-          EOL'
+          EOL"
 
           fi
 
@@ -74,21 +70,21 @@ jobs:
             
             NGINX_CONF="/etc/nginx/sites-available/fastapi-book-project"
             if [ ! -f "$NGINX_CONF" ]; then
-              sudo bash -c 'cat > /etc/nginx/sites-available/fastapi-book-project <<EOL
+              sudo bash -c "cat <<EOL > /etc/nginx/sites-available/fastapi-book-project
               server {
               listen 77;
-              server_name '${{ secrets.AWS_SERVER_IP }}:77';
+              server_name ${{ secrets.AWS_SERVER_IP }};
               
               location / {
               proxy_pass http://127.0.0.1:7777;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header Host \$host;
+              proxy_set_header X-Real-IP \$remote_addr;
+              proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
               }
               
               error_page 502 /502.html;
               }
-              EOL'
+              EOL"
               
               sudo ln -s /etc/nginx/sites-available/fastapi-book-project /etc/nginx/sites-enabled/
               sudo nginx -t && sudo systemctl restart nginx
