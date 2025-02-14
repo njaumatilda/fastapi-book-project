@@ -25,7 +25,7 @@ jobs:
           ssh-keyscan -H $AWS_SERVER_IP >> ~/.ssh/known_hosts
 
 
-          ssh $USER@$AWS_IP << 'EOF'
+          ssh $USER@$AWS_SERVER_IP << 'EOF'
 
             if [ ! -d "/home/ubuntu/fastapi-book-project" ]; then
              git clone https://github.com/njaumatilda/fastapi-book-project.git /home/ubuntu/fastapi-book-project:
