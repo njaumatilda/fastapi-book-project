@@ -80,4 +80,4 @@ async def get_book(book_id: int) -> Book:
     if book is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Book not found") 
     else:
-        return books
+        return book
