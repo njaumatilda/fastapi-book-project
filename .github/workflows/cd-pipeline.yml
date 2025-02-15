@@ -9,86 +9,167 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
+
       - name: Deploy to server
         env:
-          AWS_SERVER_IP: '${{ secrets.AWS_SERVER_IP }}'
-          SERVER_PASSWORD: '${{ secrets.SERVER_PASSWORD }}'
-          SERVER_USER: '${{ secrets.SERVER_USER }}'
-        run: >
-          sudo apt-get update && sudo apt-get install -y sshpass
-
-          mkdir -p ~/.ssh
-
-          ssh-keyscan -H $AWS_SERVER_IP >> ~/.ssh/known_hosts
-
-
-          sshpass -p ${{ secrets.SERVER_PASSWORD }} ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@$AWS_SERVER_IP "echo Connected successfully" << 'EOF'
-
-            if [ ! -d "/home/$SERVER_USER/fastapi-book-project" ]; then
-             git clone https://github.com/njaumatilda/fastapi-book-project.git /home/$SERVER_USER/fastapi-book-project
-            fi
-
-           cd /home/$SERVER_USER/fastapi-book-project
-           git pull origin main  
-
-           pip install -r requirements.txt  
-
-
-          SERVICE_FILE="/etc/systemd/system/fastapi-book-project.service"
-
-          if [ ! -f "$SERVICE_FILE" ]; then
-
-          sudo bash -c "cat <<EOL > /etc/systemd/system/fastapi-book-project.service
-           [Unit]
-            Description=FastAPI Application
-            After=network.target
-
-           [Service]
-            User=$SERVER_USER
-            WorkingDirectory=/home/$SERVER_USER/fastapi-book-project
-            ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 7777
-            Restart=always
-            Environment=PYTHONUNBUFFERED=1
-
-           [Install]
-            WantedBy=multi-user.target
-          EOL"
-
+          AWS_SERVER_IP: "${{ secrets.AWS_SERVER_IP }}"
+          SERVER_PASSWORD: "${{ secrets.SERVER_PASSWORD }}"
+          SERVER_USER: "${{ secrets.SERVER_USER }}"
+        run: |
+          # Install sshpass with error checking
+          echo "Installing required packages..."
+          if ! sudo apt-get update && sudo apt-get install -y sshpass; then
+            echo "Failed to install packages"
+            exit 1
           fi
 
-          sudo systemctl daemon-reload
+          # Set up SSH with error handling
+          echo "Setting up SSH..."
+          mkdir -p ~/.ssh
+          if ! ssh-keyscan -H $AWS_SERVER_IP >> ~/.ssh/known_hosts; then
+            echo "Failed to add server to known hosts"
+            exit 1
+          fi
 
-          sudo systemctl enable fastapi-book-project
+          # Create deployment script with error handling and logging
+          echo "Deploying to server..."
+          sshpass -p ${{ secrets.SERVER_PASSWORD }} ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@$AWS_SERVER_IP << 'EOF'
+            set -e  # Exit on any error
 
-          sudo systemctl restart fastapi-book-project
+            # Function for error handling
+            handle_error() {
+              echo "Error occurred in deployment at line $1"
+              exit 1
+            }
+            trap 'handle_error $LINENO' ERR
 
-          if ! command -v nginx &> /dev/null; then
+            echo "Checking Python installation..."
+            if ! command -v python3 &> /dev/null; then
+                sudo apt-get update && sudo apt-get install -y python3 python3-pip
+            fi
+
+            # Set up project directory
+            PROJECT_DIR="/home/$SERVER_USER/fastapi-book-project"
+            echo "Setting up project in $PROJECT_DIR"
+            
+            if [ ! -d "$PROJECT_DIR" ]; then
+              echo "Cloning repository..."
+              git clone https://github.com/njaumatilda/fastapi-book-project.git $PROJECT_DIR
+            fi
+
+            cd $PROJECT_DIR
+            
+            # Backup current code state
+            if [ -d "$PROJECT_DIR" ]; then
+              echo "Backing up current state..."
+              cp -r $PROJECT_DIR "${PROJECT_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
+            fi
+
+            echo "Updating code..."
+            git pull origin main
+
+            # Set up Python virtual environment
+            echo "Setting up Python environment..."
+            python3 -m pip install --user virtualenv
+            if [ ! -d "venv" ]; then
+              python3 -m virtualenv venv
+            fi
+            source venv/bin/activate
+            pip install -r requirements.txt
+
+            # Create systemd service with proper logging
+            SERVICE_FILE="/etc/systemd/system/fastapi-book-project.service"
+            echo "Configuring service..."
+            sudo bash -c "cat <<EOL > $SERVICE_FILE
+            [Unit]:
+            Description=FastAPI Application
+            After=network.target
+            
+            [Service]
+            User=$SERVER_USER
+            WorkingDirectory=$PROJECT_DIR
+            ExecStart=$PROJECT_DIR/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 7777
+            Restart=always
+            Environment=PYTHONUNBUFFERED=1
+            
+            # Improved logging
+            StandardOutput=append:/var/log/fastapi-book-project.log
+            StandardError=append:/var/log/fastapi-book-project.error.log
+            
+            [Install]
+            WantedBy=multi-user.target
+            EOL"
+
+            # Create log files with proper permissions
+            sudo touch /var/log/fastapi-book-project.log /var/log/fastapi-book-project.error.log
+            sudo chown $SERVER_USER:$SERVER_USER /var/log/fastapi-book-project.log /var/log/fastapi-book-project.error.log
+
+            echo "Reloading services..."
+            sudo systemctl daemon-reload
+            sudo systemctl enable fastapi-book-project
+            sudo systemctl restart fastapi-book-project
+
+            # Check if service started successfully
+            if ! sudo systemctl is-active --quiet fastapi-book-project; then
+              echo "Service failed to start. Checking logs..."
+              sudo journalctl -u fastapi-book-project -n 50
+              handle_error $LINENO
+            fi
+
+            # Install and configure Nginx
+            echo "Configuring Nginx..."
+            if ! command -v nginx &> /dev/null; then
               sudo apt update && sudo apt install -y nginx
               sudo systemctl enable nginx
               sudo systemctl start nginx
             fi
-            
+
             NGINX_CONF="/etc/nginx/sites-available/fastapi-book-project"
-            if [ ! -f "$NGINX_CONF" ]; then
-              sudo bash -c "cat <<EOL > /etc/nginx/sites-available/fastapi-book-project
-              server {
-              listen 77;
-              server_name ${{ secrets.AWS_SERVER_IP }};
-              
-              location / {
-              proxy_pass http://127.0.0.1:7777;
-              proxy_set_header Host \$host;
-              proxy_set_header X-Real-IP \$remote_addr;
-              proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-              }
-              
-              error_page 502 /502.html;
-              }
-              EOL"
-              
-              sudo ln -s /etc/nginx/sites-available/fastapi-book-project /etc/nginx/sites-enabled/
-              sudo nginx -t && sudo systemctl restart nginx
-              
+            # Backup existing nginx config if it exists
+            if [ -f "$NGINX_CONF" ]; then
+              sudo cp $NGINX_CONF "${NGINX_CONF}.backup_$(date +%Y%m%d_%H%M%S)"
             fi
 
-          EOF
+            sudo bash -c "cat <<EOL > $NGINX_CONF
+            server {    
+            listen 77;
+            server_name $AWS_SERVER_IP;
+            
+            # Improved logging
+            access_log /var/log/nginx/fastapi-book-project.access.log;
+            error_log /var/log/nginx/fastapi-book-project.error.log;
+             location / {
+             proxy_pass http://127.0.0.1:7777;
+             proxy_set_header Host \$host;
+             proxy_set_header X-Real-IP \$remote_addr;
+             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+             
+             # Timeouts for better reliability
+             proxy_connect_timeout 60s;
+             proxy_send_timeout 60s;
+             proxy_read_timeout 60s;
+             }
+             
+             error_page 502 /502.html;
+             }
+             EOL"
+
+            # Remove existing symbolic link if it exists
+            if [ -f "/etc/nginx/sites-enabled/fastapi-book-project" ]; then
+              sudo rm /etc/nginx/sites-enabled/fastapi-book-project
+            fi
+
+            # Create new symbolic link
+            sudo ln -s $NGINX_CONF /etc/nginx/sites-enabled/
+
+            # Test and reload nginx
+            echo "Testing and reloading Nginx..."
+            if sudo nginx -t; then
+              sudo systemctl restart nginx
+            else
+              echo "Nginx configuration test failed"
+              handle_error $LINENO
+            fi
+
+            echo "Deployment completed successfully!"
+            EOF
